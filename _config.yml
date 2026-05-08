@@ -22,6 +22,9 @@ title: llz's zone
 
 Blog: /blog
 
+host: 0.0.0.0
+port: 4000
+
 markdown: kramdown
 
 collections:
